@@ -1,0 +1,22 @@
+version: '2'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: local.Dockerfile
+    env_file:
+      - .env
+    command: /bin/bash -c "sleep infinity"
+    volumes:
+      - .:/app
+    ports:
+      - "8001:8000"
+    networks:
+      - backend
+    stdin_open: true
+    tty: true
+
+networks:
+  backend:
+    external: true

@@ -1,0 +1,15 @@
+.git/
+.gitlab/
+.venv/
+scylla/
+tests/
+
+.gitignore
+
+README.md
+README.rst
+backend.dockerfile
+celeryworker.dockerfile
+mypy.ini
+setup.cfg
+sonar-project.properties

@@ -1,0 +1,164 @@
+image: registry.gitlab.com/ariksa/docker-images/ci:latest
+
+variables:
+  CONTAINER_IMAGE_NAME: "$CI_REGISTRY/ariksa/vulnerability/data-scannner/worker"
+  DOCKER_HOST: unix:///var/run/docker.sock
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_DRIVER: overlay2
+  SECRET_TOKEN: "abcde"
+  GIT_DEPTH: "0"  # Tells git to fetch all the branches of the project, required by the analysis task
+  POETRY_VIRTUALENVS_IN_PROJECT: "true"
+  ROLE_ARN: "arn:aws:iam::207707207483:role/gitlab-s3-role"
+
+stages:
+  - Static Analysis
+  - Build Test and Push Container Image
+  - Push latest image
+  - Push tag image
+  - Deploy DEV
+  - Deploy POC
+
+flake8:
+  stage: Static Analysis
+  tags:
+    - datascannerdev
+  script:
+    - make flake8
+  only:
+    - main
+    - merge_requests
+    - tags
+
+mypy:
+  stage: Static Analysis
+  tags:
+    - datascannerdev
+  script:
+    - make mypy
+  only:
+    - main
+    - merge_requests
+    - tags
+
+build-image:
+  stage: Build Test and Push Container Image
+  tags:
+    - datascannerdev
+  before_script:
+    - docker info
+  services:
+  - name: registry.gitlab.com/ariksa/docker-images/dind:latest
+    alias: docker
+  script:
+    - make build-container-image
+  only:
+    - main
+    - tags
+    - merge_requests
+
+
+tests:
+  stage: Build Test and Push Container Image
+  tags:
+    - datascannerdev
+  services:
+    - name: registry.gitlab.com/ariksa/docker-images/dind:latest
+      alias: docker
+  before_script:
+    - git config --global url."https://$GITLABPACKAGE_USERNAME:$GITLABPACKAGE_PASSWORD@gitlab.com/".insteadOf "https://gitlab.com/"
+    - make pre-test
+  script:
+    - make test
+    - coverage xml
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+  only:
+    - main
+    - merge_requests
+    - tags
+
+push-latest:
+  stage: Push latest image
+  tags:
+    - datascannerdev
+  needs: [ "build-image" ,  "tests"  ]
+  services:
+  - name: registry.gitlab.com/ariksa/docker-images/dind:latest
+    alias: docker
+  script:
+    - CONTAINER_TAG=latest make push-custom-tag
+  only:
+    - main
+
+push-tag:
+  stage: Push tag image
+  tags:
+    - datascannerdev
+  needs: [ "build-image" ,  "tests" ]
+  services:
+  - name: registry.gitlab.com/ariksa/docker-images/dind:latest
+    alias: docker
+  script:
+    - CONTAINER_TAG=$CI_COMMIT_REF_NAME make push-custom-tag
+  only:
+    - tags
+
+deploy-dev:
+ stage: Deploy DEV
+ tags:
+   - datascannerdev
+ image: registry.gitlab.com/gitlab-org/cloud-deploy/aws-base:latest
+ id_tokens:
+   GITLAB_OIDC_TOKEN:
+     aud: https://gitlab.com
+ script: |
+   STS=($(aws sts assume-role-with-web-identity \
+       --role-arn ${ROLE_ARN} \
+       --role-session-name "GitLabRunner-Scanner-${CI_PIPELINE_ID}" \
+       --web-identity-token ${GITLAB_OIDC_TOKEN} \
+       --duration-seconds 3600 \
+       --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+       --output text))
+
+   export AWS_ACCESS_KEY_ID="${STS[0]}"
+   export AWS_SECRET_ACCESS_KEY="${STS[1]}"
+   export AWS_SESSION_TOKEN="${STS[2]}"
+   aws sts get-caller-identity
+   apt-get update && apt-get install -y make git
+   make upload-to-s3-dev
+
+ only:
+  - merge_requests
+  - tags
+
+# TODO: Enable this job when you want to deploy new version of data scanner automatically
+# deploy-poc:
+#  stage: Deploy POC
+#  tags:
+#    - datascannerdev
+#  image: registry.gitlab.com/gitlab-org/cloud-deploy/aws-base:latest
+#  id_tokens:
+#    GITLAB_OIDC_TOKEN:
+#      aud: https://gitlab.com
+#  script: |
+#       STS=($(aws sts assume-role-with-web-identity \
+#           --role-arn ${ROLE_ARN} \
+#           --role-session-name "GitLabRunner-Scanner-${CI_PIPELINE_ID}" \
+#           --web-identity-token ${GITLAB_OIDC_TOKEN} \
+#           --duration-seconds 3600 \
+#           --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+#           --output text))
+
+#       export AWS_ACCESS_KEY_ID="${STS[0]}"
+#       export AWS_SECRET_ACCESS_KEY="${STS[1]}"
+#       export AWS_SESSION_TOKEN="${STS[2]}"
+#       aws sts get-caller-identity
+#       apt-get update && apt-get install -y make git
+#       make upload_to_s3_poc
+
+#  only:
+#    - main
+#    - tags
